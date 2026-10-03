@@ -5,3 +5,8 @@ __pycache__/
 .env
 .env.*
 .local/
+# Run-log databases, their backups, and service logs never belong in the repository.
+*.sqlite3
+*.sqlite3-*
+*.sqlite3.*
+*.log

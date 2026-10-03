@@ -28,6 +28,11 @@ def main() -> None:
     runtime.mkdir(parents=True, exist_ok=True, mode=0o700)
     os.chmod(runtime, 0o700)
     marker.touch(mode=0o600)
+    # The run log lives beside the runtime, not in it. Deployment only makes sure
+    # its directory exists; it never copies, replaces, or deletes the database.
+    data = runtime.parent / "data"
+    data.mkdir(mode=0o700, exist_ok=True)
+    os.chmod(data, 0o700)
     for name in ("pyproject.toml", "uv.lock", "README.md"):
         shutil.copy2(source / name, runtime / name)
     for name in ("src", "config"):

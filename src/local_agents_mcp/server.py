@@ -13,6 +13,7 @@ from typing import Any
 
 from mcp.server import MCPServer
 
+from local_agents_mcp import observability
 from local_agents_mcp import routing as jev_routing
 
 
@@ -26,6 +27,11 @@ class EmptyResponse(RuntimeError):
     """The worker answered with null, empty, or whitespace-only content."""
 
     reason = "empty_response"
+
+    def __init__(self, message: str, *, finish_reason: Any = None, usage: Any = None):
+        super().__init__(message)
+        self.finish_reason = finish_reason
+        self.usage = usage
 
 
 def _load_config() -> dict[str, Any]:
@@ -136,7 +142,9 @@ def _chat_sync(agent_name: str, task: str, context: str, max_tokens: int) -> dic
         completion_tokens = (result.get("usage") or {}).get("completion_tokens")
         raise EmptyResponse(
             f"empty_response: {agent['model']} returned no answer text "
-            f"(finish_reason={finish_reason}, completion_tokens={completion_tokens})"
+            f"(finish_reason={finish_reason}, completion_tokens={completion_tokens})",
+            finish_reason=finish_reason,
+            usage=result.get("usage"),
         )
 
     return {
@@ -195,6 +203,29 @@ async def _agent_availability(
     return available, unavailable
 
 
+def _step_agent(name: str) -> dict[str, Any]:
+    """What the run log may record about a worker. A name not in the config is not stored."""
+    try:
+        agent = _load_config()["agents"][name]
+        return {"name": name, "provider": agent.get("provider"), "model": agent.get("model")}
+    except Exception:
+        return {"name": "unknown"}
+
+
+async def _run_worker(
+    run: observability.Run, name: str, task: str, context: str, max_tokens: int
+) -> dict[str, Any]:
+    """Call one worker inside a recorded step."""
+    with run.step("worker", **_step_agent(name)) as step:
+        result = await asyncio.to_thread(_chat_sync, name, task, context, max_tokens)
+        step.set(
+            finish_reason=result["finish_reason"],
+            truncated=result["finish_reason"] == "length",
+            **observability.usage_tokens(result["usage"]),
+        )
+        return result
+
+
 mcp = MCPServer(
     "Local AI Agents",
     instructions=(
@@ -234,13 +265,23 @@ async def ask_local_agent(
     task: str,
     context: str = "",
     max_tokens: int = 1200,
+    project: str = "",
 ) -> dict[str, Any]:
-    """Ask one named local agent to perform a task using optional supporting context."""
+    """Ask one named local agent to perform a task using optional supporting context.
+
+    project is an optional short label for the caller's repository, such as its
+    folder name. It is only shown in the local run log.
+    """
     if not task.strip():
         raise ValueError("task cannot be empty")
     if not 1 <= max_tokens <= 4096:
         raise ValueError("max_tokens must be between 1 and 4096")
-    return await asyncio.to_thread(_chat_sync, agent, task, context, max_tokens)
+    with observability.Run(
+        "ask_local_agent", task=task, context=context, max_tokens=max_tokens, project=project
+    ) as run:
+        result = await _run_worker(run, agent, task, context, max_tokens)
+        run.set(final_agent=result["agent"], truncated=result["finish_reason"] == "length")
+        return {**result, "run_id": run.run_id}
 
 
 @mcp.tool()
@@ -249,8 +290,13 @@ async def compare_local_agents(
     task: str,
     context: str = "",
     max_tokens_each: int = 800,
+    project: str = "",
 ) -> dict[str, Any]:
-    """Ask two or three local agents the same question and return their answers."""
+    """Ask two or three local agents the same question and return their answers.
+
+    project is an optional short label for the caller's repository, such as its
+    folder name. It is only shown in the local run log.
+    """
     if not 2 <= len(agents) <= 3:
         raise ValueError("Choose two or three agents")
     if not task.strip():
@@ -260,14 +306,25 @@ async def compare_local_agents(
     results: list[dict[str, Any]] = []
     # The default machine has 16 GB of unified memory. Loading several models
     # at once is likely to evict models or exhaust memory.
-    for name in agents:
-        try:
-            results.append(await asyncio.to_thread(_chat_sync, name, task, context, max_tokens_each))
-        except Exception as error:
-            results.append(
-                {"agent": name, "reason": getattr(error, "reason", "worker_error"), "error": str(error)}
-            )
-    return {"results": results}
+    with observability.Run(
+        "compare_local_agents", task=task, context=context, max_tokens=max_tokens_each, project=project
+    ) as run:
+        for name in agents:
+            try:
+                results.append(await _run_worker(run, name, task, context, max_tokens_each))
+            except Exception as error:
+                results.append(
+                    {"agent": name, "reason": getattr(error, "reason", "worker_error"), "error": str(error)}
+                )
+        answered = [result for result in results if "response" in result]
+        if len(answered) == len(results):
+            run.set(status="ok")
+        elif answered:
+            run.set(status="partial")
+        else:
+            run.set(status="error", error_kind="all_workers_failed")
+        run.set(truncated=any(result["finish_reason"] == "length" for result in answered))
+        return {"results": results, "run_id": run.run_id}
 
 
 @mcp.tool()
@@ -275,11 +332,14 @@ async def route_local_agent(
     task: str,
     context: str = "",
     max_tokens: int = 1200,
+    project: str = "",
 ) -> dict[str, Any]:
     """Pick the best available local agent for a task, run it, and report how it was chosen.
 
     Only the task text is sent to the TypeSafe cloud API for the choice; the
-    context goes only to the chosen local agent.
+    context goes only to the chosen local agent. project is an optional short
+    label for the caller's repository, such as its folder name. It is only shown
+    in the local run log and is not sent to the cloud API.
     """
     if not task.strip():
         raise ValueError("task cannot be empty")
@@ -287,42 +347,66 @@ async def route_local_agent(
         raise ValueError("max_tokens must be between 1 and 4096")
     config = _load_config()
     routing = jev_routing.load_routing(config)
-    available, unavailable = await _agent_availability(config, list(routing["question"]["criteria"]))
-    if not available:
-        detail = "; ".join(f"{name}: {reason}" for name, reason in unavailable.items())
-        raise RuntimeError(f"No routable local agent is available. {detail}")
+    with observability.Run(
+        "route_local_agent", task=task, context=context, max_tokens=max_tokens, project=project
+    ) as run:
+        with run.step("availability", "providers"):
+            available, unavailable = await _agent_availability(config, list(routing["question"]["criteria"]))
+        if not available:
+            run.set(error_kind="no_available_agent")
+            detail = "; ".join(f"{name}: {reason}" for name, reason in unavailable.items())
+            raise RuntimeError(f"No routable local agent is available. {detail}")
 
-    decision = await jev_routing.select(routing, task, context, available)
-    ranked = decision.pop("ranked")
-    # Each agent is tried at most once, best first, up to the configured limit.
-    attempts: list[dict[str, Any]] = []
-    for name in ranked[: routing["fallback"]["max_worker_attempts"]]:
-        try:
-            result = await asyncio.to_thread(_chat_sync, name, task, context, max_tokens)
-        except Exception as error:
-            attempts.append(
-                {
-                    "agent": name,
-                    "ok": False,
-                    "reason": getattr(error, "reason", "worker_error"),
-                    "error": str(error),
-                }
+        with run.step("jev", "jev", model=routing.get("jev", {}).get("model", "jev-latest")) as step:
+            decision = await jev_routing.select(routing, task, context, available)
+            usage = decision.pop("usage")
+            reason = decision["fallback_reason"]
+            if decision["source"] == "jev":
+                step.set(confidence=decision["confidence"], **observability.usage_tokens(usage))
+            elif decision["source"] == "only_available":
+                step.set(status="skipped", reason="only_available")
+            else:
+                # No request leaves the machine without a key or the SDK.
+                made_no_call = reason in ("missing_key", "sdk_not_installed")
+                step.set(status="skipped" if made_no_call else "error", reason=reason)
+        run.set(routing_source=decision["source"], fallback_reason=decision["fallback_reason"])
+        ranked = decision.pop("ranked")
+        # Each agent is tried at most once, best first, up to the configured limit.
+        attempts: list[dict[str, Any]] = []
+        for name in ranked[: routing["fallback"]["max_worker_attempts"]]:
+            try:
+                result = await _run_worker(run, name, task, context, max_tokens)
+            except Exception as error:
+                attempts.append(
+                    {
+                        "agent": name,
+                        "ok": False,
+                        "reason": getattr(error, "reason", "worker_error"),
+                        "error": str(error),
+                    }
+                )
+                continue
+            attempts.append({"agent": name, "ok": True})
+            run.set(
+                final_agent=name,
+                worker_fallback=name != ranked[0],
+                truncated=result["finish_reason"] == "length",
             )
-            continue
-        attempts.append({"agent": name, "ok": True})
-        return {
-            **result,
-            "routing": {
-                "chosen": name,
-                "first_choice": ranked[0],
-                **decision,
-                "available": available,
-                "unavailable": unavailable,
-                "attempts": attempts,
-            },
-        }
-    failures = "; ".join(f"{attempt['agent']}: {attempt['error']}" for attempt in attempts)
-    raise RuntimeError(f"All {len(attempts)} worker attempts failed. {failures}")
+            return {
+                **result,
+                "routing": {
+                    "chosen": name,
+                    "first_choice": ranked[0],
+                    **decision,
+                    "available": available,
+                    "unavailable": unavailable,
+                    "attempts": attempts,
+                },
+                "run_id": run.run_id,
+            }
+        run.set(error_kind="all_workers_failed")
+        failures = "; ".join(f"{attempt['agent']}: {attempt['error']}" for attempt in attempts)
+        raise RuntimeError(f"All {len(attempts)} worker attempts failed. {failures}")
 
 
 def main() -> None:
@@ -331,6 +415,7 @@ def main() -> None:
     parser.add_argument("--http", action="store_true", help="Serve authenticated Streamable HTTP")
     parser.add_argument("--port", type=int, default=8000)
     args = parser.parse_args()
+    observability.transport = "http" if args.http else "stdio"
     if args.http:
         import uvicorn
 

@@ -115,10 +115,15 @@ async def ask_jev(
 
     if answer.choice not in available:
         raise JevUnavailable("invalid_choice")
+    usage = getattr(response, "usage", None)
     return {
         "choice": answer.choice,
         "confidence": answer.confidence,
         "probabilities": dict(answer.probabilities),
+        "usage": {
+            "input_tokens": getattr(usage, "input_tokens", None),
+            "output_tokens": getattr(usage, "output_tokens", None),
+        },
     }
 
 
@@ -131,6 +136,8 @@ async def select(
         "confidence": None,
         "probabilities": None,
         "fallback_reason": None,
+        # Token counts for the run log; the caller removes this before replying.
+        "usage": None,
     }
     order = fallback_ranking(routing, available)
     if len(available) == 1:
@@ -151,6 +158,7 @@ async def select(
                 source="jev",
                 confidence=answer["confidence"],
                 probabilities=probabilities,
+                usage=answer["usage"],
             )
     decision["ranked"] = order
     return decision

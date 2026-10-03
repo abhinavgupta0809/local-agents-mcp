@@ -107,7 +107,8 @@ class RouteLocalAgentTests(unittest.IsolatedAsyncioTestCase):
         self.config["routing"]["jev"]["timeout_seconds"] = 0.5
         for patcher in (
             mock.patch.object(routing, "KEY_PATH", self.key_path),
-            mock.patch.dict(os.environ, {}, clear=False),
+            # The run log goes to a temporary file, never the real database.
+            mock.patch.dict(os.environ, {"LOCAL_AGENTS_OBS_DB": str(Path(self.tmp.name) / "obs.sqlite3")}, clear=False),
             mock.patch.object(server, "_request_json", self.local),
             mock.patch.object(server, "_load_config", lambda: self.config),
         ):
