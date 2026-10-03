@@ -25,6 +25,35 @@ Not implemented (future work):
 - The `horizon` worker is configured, but its llama.cpp runtime is not set up here, so it is reported as unavailable. No MLX worker is configured.
 - The macOS login service and the Cloudflare Tunnel are set up on this Mac by hand. Their service files and settings are not part of this repository.
 
+## Installed deployment on this Mac
+
+The source repository and Git history live at `$HOME/Desktop/projects/local-agents-mcp`
+(the existing parent folder may appear as `Projects` on this Mac).
+macOS restricts background-service access to Desktop. The `ai.localagents.mcp`
+LaunchAgent therefore runs a deployed copy at
+`$HOME/Library/Application Support/local-ai-agents/runtime`, with logs under
+`$HOME/Library/Logs/local-ai-agents`. This runtime has no Git repository; the Desktop
+checkout remains the source of truth.
+
+After changing source, configuration, or private keys, deploy from the checkout:
+
+```sh
+python3 scripts/deploy_macos.py
+claude mcp list
+```
+
+The deployment command copies the runtime files and the gateway token and optional Jev
+key, synchronizes locked dependencies, and restarts the login service. Private runtime
+files use owner-only permissions. It does not call Jev or local models. The command needs
+`uv` on PATH and briefly interrupts gateway availability. For a restart with no updates:
+
+```sh
+launchctl kickstart -k "gui/$(id -u)/ai.localagents.mcp"
+```
+
+Claude Code and Antigravity use the public MCP URL; relocation does not change their
+remote connection settings. Keep `.local/` ignored by Git and private in both locations.
+
 ## 1. Local setup
 
 You need [uv](https://docs.astral.sh/uv/) and Ollama running with the models named in `config/agents.json`. From this directory:
