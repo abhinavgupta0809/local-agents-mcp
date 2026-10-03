@@ -1,0 +1,74 @@
+{
+  "providers": {
+    "ollama": {
+      "base_url": "http://127.0.0.1:11434/v1",
+      "api_key": "ollama",
+      "timeout_seconds": 240
+    },
+    "llama_cpp": {
+      "base_url": "http://127.0.0.1:8080/v1",
+      "api_key": "local",
+      "timeout_seconds": 240
+    },
+    "mlx": {
+      "base_url": "http://127.0.0.1:8081/v1",
+      "api_key": "local",
+      "timeout_seconds": 240
+    }
+  },
+  "agents": {
+    "coder": {
+      "description": "Implements and explains code with an emphasis on correctness and small diffs.",
+      "provider": "ollama",
+      "model": "qwen3:8b",
+      "temperature": 0.15,
+      "request_overrides": {"reasoning_effort": "none"},
+      "system_prompt": "You are a local coding specialist. Give concrete, technically precise answers. State assumptions, detect risky changes, and prefer small maintainable implementations."
+    },
+    "reviewer": {
+      "description": "Reviews code and plans for bugs, edge cases, and maintainability risks.",
+      "provider": "ollama",
+      "model": "gemma3:4b",
+      "temperature": 0.1,
+      "system_prompt": "You are a careful code reviewer. Prioritize real correctness, security, and reliability problems. Explain impact and propose a specific fix. Avoid cosmetic observations unless they materially affect maintenance."
+    },
+    "second_opinion": {
+      "description": "Provides an independent alternative analysis for comparison.",
+      "provider": "ollama",
+      "model": "qwen3:4b",
+      "temperature": 0.35,
+      "request_overrides": {"reasoning_effort": "none"},
+      "system_prompt": "You are an independent technical adviser. Challenge assumptions, consider alternatives, and give a concise recommendation with tradeoffs."
+    },
+    "horizon": {
+      "description": "Uses the local IFM K2 Horizon GGUF model once llama.cpp is running it.",
+      "provider": "llama_cpp",
+      "model": "k2-horizon",
+      "temperature": 0.2,
+      "system_prompt": "You are a local general-purpose assistant. Work carefully from the supplied task and context, and say when evidence is insufficient."
+    }
+  },
+  "routing": {
+    "question": {
+      "instructions": "Which local worker should carry out the request in `task`? Choose by the kind of work the task asks for. `context`, when present, is supporting material for the task and not a separate request.",
+      "criteria": {
+        "coder": "The task asks to produce or change code, or to explain how code works: implement a function, write a script or tests, fix a bug, refactor. Not for judging work that already exists.",
+        "reviewer": "The task asks to inspect existing code, a diff, or a plan and report defects: bugs, edge cases, security or reliability problems. Not for writing new code.",
+        "second_opinion": "The task asks to weigh a decision or approach: compare alternatives, challenge assumptions, give tradeoffs and a recommendation. Not for line-by-line review or implementation.",
+        "horizon": "The task is general work that is not about code: summarising, drafting or rewriting prose, answering general questions, pulling information out of text."
+      }
+    },
+    "jev": {
+      "model": "jev-latest",
+      "send_context": false,
+      "task_char_limit": 12000,
+      "context_char_limit": 8000,
+      "timeout_seconds": 5,
+      "max_retries": 1
+    },
+    "fallback": {
+      "order": ["coder", "reviewer", "second_opinion", "horizon"],
+      "max_worker_attempts": 2
+    }
+  }
+}

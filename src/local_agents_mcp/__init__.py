@@ -1,0 +1,2 @@
+"""Local Agents MCP package."""
+
